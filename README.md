@@ -1,8 +1,16 @@
 # kaggle-free-gpu
 
 <p align="center">
-  <img src="assets/hero.jpg" alt="Kaggle Free-GPU Enterprise Compute" width="100%">
+  <img src="https://raw.githubusercontent.com/ericmaddox/kaggle-free-gpu/main/assets/hero.jpg" alt="Kaggle Free-GPU Enterprise Compute" width="100%">
 </p>
+
+[![PyPI - Version](https://img.shields.io/pypi/v/kaggle-free-gpu?logo=pypi&logoColor=white&color=blue)](https://pypi.org/project/kaggle-free-gpu/)
+[![PyPI - Status](https://img.shields.io/pypi/status/kaggle-free-gpu?color=blue)](https://pypi.org/project/kaggle-free-gpu/)
+[![GitHub Release](https://img.shields.io/github/v/release/ericmaddox/kaggle-free-gpu?color=blue&logo=github)](https://github.com/ericmaddox/kaggle-free-gpu/releases)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
+[![MCP Protocol](https://img.shields.io/badge/MCP-1.3.0%2B-purple.svg)](https://modelcontextprotocol.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-12%20passed-brightgreen.svg)](tests/)
 
 **MCP Server, CLI, and Agent Skill for Zero-Cost Tesla T4 x2 GPU Execution via the Kaggle REST API.**
 

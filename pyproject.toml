@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kaggle-free-gpu"
-version = "0.1.0"
+version = "0.1.1"
 description = "Give any coding agent free Tesla T4 x2 GPUs via Kaggle's REST API -- MCP server, CLI, and skill."
 readme = "README.md"
 license = "MIT"
