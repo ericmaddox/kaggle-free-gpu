@@ -1,0 +1,12 @@
+{
+  "id": "<owner>/kfg-data-processing-demo",
+  "title": "KFG Data Processing Demo",
+  "code_file": "data_processing.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["gpu", "nlp"]
+}

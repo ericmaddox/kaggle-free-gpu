@@ -1,0 +1,13 @@
+{
+  "id": "<owner>/kfg-inference-bench-demo",
+  "title": "KFG Inference Bench Demo",
+  "code_file": "inference_bench.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["gpu", "nlp"]
+}
+

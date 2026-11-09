@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments & build artifacts
+.venv/
+venv/
+ENV/
+dist/
+build/
+*.egg-info/
+
+# Test, coverage & linter caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets & credentials — NEVER commit
+.env
+.env.*
+!.env.example
+kaggle.json
+access_token
+*token*
+*.pem
+*.key
+
+# Internal design briefs & local scratch notes
+Kaggle Free-GPU Skill - Brief for Gemini Argon.md
+*Brief*.md
+scratch/
+
+# Downloaded kernel outputs, model weights & scratch dirs
+outputs/
+tmp_*/
+.kaggle-free-gpu/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+*.tar.gz
+*.zip
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
