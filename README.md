@@ -1,5 +1,9 @@
 # kaggle-free-gpu
 
+<p align="center">
+  <img src="assets/hero.jpg" alt="Kaggle Free-GPU Enterprise Compute" width="100%">
+</p>
+
 **MCP Server, CLI, and Agent Skill for Zero-Cost Tesla T4 x2 GPU Execution via the Kaggle REST API.**
 
 `kaggle-free-gpu` provides coding agents (Claude Code, Cursor, Antigravity) and ML engineers with programmatic access to Kaggle's dual NVIDIA Tesla T4 GPUs (2 x 15,360 MiB VRAM, Python 3.13, PyTorch 2.11+cu130) over direct REST and RPC calls to `https://www.kaggle.com/api/v1`.
