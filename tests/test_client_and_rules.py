@@ -10,7 +10,12 @@ import pytest
 
 from kaggle_free_gpu import server
 from kaggle_free_gpu.cli import build_parser
-from kaggle_free_gpu.client import KaggleGPUClient, resolve_auth_headers, split_owner_slug
+from kaggle_free_gpu.client import (
+    KaggleGPUClient,
+    _safe_extract_zip,
+    resolve_auth_headers,
+    split_owner_slug,
+)
 from kaggle_free_gpu.models import KernelMetadata, slugify_title
 from kaggle_free_gpu.quota import QuotaLedger
 
@@ -167,7 +172,7 @@ def test_client_push_status_output_and_size_guard(tmp_path: Path) -> None:
     mock_out_resp.status_code = 200
     mock_out_resp.json.return_value = {
         "files": [
-            {"fileName": "huge_model.gguf", "url": "https://example.com/huge_model.gguf"},
+            {"fileName": "huge_model.gguf", "url": "https://www.kaggleusercontent.com/kf/123/huge_model.gguf"},
         ],
         "log": json.dumps([{"stream_name": "stdout", "time": 42.5, "data": "done\n"}]),
     }
@@ -177,13 +182,65 @@ def test_client_push_status_output_and_size_guard(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     with (
         patch("httpx.Client.post", return_value=mock_out_resp),
-        patch("httpx.Client.head", return_value=mock_head_resp),
+        patch("httpx.head", return_value=mock_head_resp),
     ):
         out_res = client.kernel_output("testuser/my-gpu-test", out_dir, max_size_mb=500, force_large=False)
         assert out_res.runtime_seconds == 42.5
         assert len(out_res.files) == 1
         assert out_res.files[0].downloaded is False
         assert any("Gotcha #5" in w for w in out_res.warnings)
+
+
+def test_security_controls_path_traversal_ssrf_and_zip_slip(tmp_path: Path) -> None:
+    import zipfile
+
+    # 1. Block code_file path traversal outside kernel folder
+    kernel_dir = tmp_path / "kdir"
+    kernel_dir.mkdir()
+    outside_secret = tmp_path / "secret.py"
+    outside_secret.write_text("SECRET = 123\n", encoding="utf-8")
+
+    meta = KernelMetadata(
+        id="testuser/my-test",
+        title="My Test",
+        code_file="../secret.py",
+    )
+    report = meta.validate_for_push(kernel_dir)
+    assert not report.valid
+    assert any("Security error" in err for err in report.errors)
+
+    # 2. Reject cleartext HTTP or non-Kaggle base_url (prevent credential leak)
+    with pytest.raises(ValueError, match="Security error"):
+        KaggleGPUClient(api_token="KGAT_test", base_url="http://www.kaggle.com/api/v1")
+    with pytest.raises(ValueError, match="Security error"):
+        KaggleGPUClient(api_token="KGAT_test", base_url="https://evil.example.com/api/v1")
+
+    # 3. Reject slug injection characters
+    with pytest.raises(ValueError, match="Invalid characters"):
+        split_owner_slug("testuser/bad;slug?query=1")
+
+    # 4. Reject SSRF / untrusted download URL in kernel_output
+    ledger = QuotaLedger(tmp_path / "usage.json")
+    client = KaggleGPUClient(api_token="KGAT_test", username="testuser", quota_ledger=ledger)
+    mock_ssrf_resp = MagicMock()
+    mock_ssrf_resp.status_code = 200
+    mock_ssrf_resp.json.return_value = {
+        "files": [
+            {"fileName": "meta.json", "url": "http://169.254.169.254/latest/meta-data/"},
+        ],
+        "log": "[]",
+    }
+    with patch("httpx.Client.post", return_value=mock_ssrf_resp):
+        ssrf_out = client.kernel_output("testuser/my-test", tmp_path / "out_ssrf")
+        assert ssrf_out.files[0].downloaded is False
+        assert any("Security warning" in w for w in ssrf_out.warnings)
+
+    # 5. Reject Zip Slip archive member escaping target_dir
+    bad_zip = tmp_path / "evil.zip"
+    with zipfile.ZipFile(bad_zip, "w") as zf:
+        zf.writestr("../../escaped.txt", "pwned")
+    with pytest.raises(ValueError, match="Zip Slip"):
+        _safe_extract_zip(bad_zip, tmp_path / "extract_target", max_total_bytes=1024 * 1024)
 
 
 def test_mcp_server_tools_and_cli_parser(tmp_path: Path) -> None:

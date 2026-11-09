@@ -9,9 +9,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -119,8 +121,19 @@ def resolve_auth_headers(
     )
 
 
+_SAFE_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+_ALLOWED_API_HOSTS = {"www.kaggle.com", "kaggle.com"}
+_ALLOWED_DOWNLOAD_HOST_SUFFIXES = (
+    ".kaggleusercontent.com",
+    "kaggleusercontent.com",
+    ".kaggle.com",
+    "kaggle.com",
+    "storage.googleapis.com",
+)
+
+
 def split_owner_slug(owner_slug: str) -> tuple[str, str]:
-    """Split 'owner/slug' (or '/code/owner/slug') and validate both parts."""
+    """Split 'owner/slug' (or '/code/owner/slug') and validate both parts against injection."""
     cleaned = owner_slug.strip().strip("/")
     if cleaned.startswith("code/"):
         cleaned = cleaned[len("code/") :].strip("/")
@@ -133,7 +146,78 @@ def split_owner_slug(owner_slug: str) -> tuple[str, str]:
         raise ValueError(
             f"Invalid kernel reference '{owner_slug}'. Both owner and slug must be non-empty."
         )
+    if not _SAFE_SLUG_RE.match(owner) or not _SAFE_SLUG_RE.match(slug):
+        raise ValueError(
+            f"Invalid characters in kernel reference '{owner_slug}'. Only alphanumeric, '-', '_', and '.' are allowed."
+        )
     return owner, slug
+
+
+def _validate_base_url(base_url: str) -> str:
+    """Ensure base_url uses HTTPS and targets the official Kaggle host (prevents credential leak)."""
+    if "api.kaggle.com" in base_url:
+        raise ValueError(
+            "Gotcha #3 violation: Do NOT use 'api.kaggle.com' (broken host in Kaggle CLI 1.8). "
+            "Use 'https://www.kaggle.com/api/v1'."
+        )
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _ALLOWED_API_HOSTS:
+        raise ValueError(
+            f"Security error: Untrusted or non-HTTPS base_url '{base_url}'. "
+            "Credentials may only be sent to 'https://www.kaggle.com/api/v1'."
+        )
+    return base_url.rstrip("/")
+
+
+def _is_trusted_download_url(url: str) -> bool:
+    """Validate that a signed output download URL uses HTTPS and an official Kaggle/GCS domain."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return any(
+        host == suffix.lstrip(".") or (suffix.startswith(".") and host.endswith(suffix))
+        for suffix in _ALLOWED_DOWNLOAD_HOST_SUFFIXES
+    )
+
+
+def _safe_extract_zip(zip_path: Path, target_dir: Path, max_total_bytes: int) -> None:
+    """Safely extract a zip archive while blocking Zip Slip, symlinks, and Zip Bombs."""
+    resolved_target = target_dir.resolve()
+    total_extracted = 0
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            # Reject symlinks inside zip archive (POSIX S_IFLNK = 0o120000)
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError(f"Security error: Refusing to extract symlink '{info.filename}' from zip archive.")
+
+            rel_member = Path(info.filename)
+            if rel_member.is_absolute() or rel_member.drive or ".." in rel_member.parts:
+                raise ValueError(f"Security error: Zip Slip path traversal detected in '{info.filename}'.")
+
+            dest = (resolved_target / rel_member).resolve()
+            if not dest.is_relative_to(resolved_target):
+                raise ValueError(f"Security error: Zip member '{info.filename}' resolves outside target directory.")
+
+            if info.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src_f, dest.open("wb") as dst_f:
+                while True:
+                    chunk = src_f.read(65536)
+                    if not chunk:
+                        break
+                    total_extracted += len(chunk)
+                    if total_extracted > max_total_bytes:
+                        dst_f.close()
+                        dest.unlink(missing_ok=True)
+                        raise ValueError(
+                            f"Security error: Zip archive exceeded maximum uncompressed size ({max_total_bytes} bytes)."
+                        )
+                    dst_f.write(chunk)
 
 
 class KaggleGPUClient:
@@ -148,12 +232,7 @@ class KaggleGPUClient:
         quota_ledger: QuotaLedger | None = None,
         timeout: float = 60.0,
     ) -> None:
-        if "api.kaggle.com" in base_url:
-            raise ValueError(
-                "Gotcha #3 violation: Do NOT use 'api.kaggle.com' (broken host in Kaggle CLI 1.8). "
-                "Use 'https://www.kaggle.com/api/v1'."
-            )
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _validate_base_url(base_url)
         self._auth_headers, self.username = resolve_auth_headers(
             api_token=api_token,
             username=username,
@@ -481,10 +560,22 @@ class KaggleGPUClient:
                 if not file_name or not file_url:
                     continue
 
-                # Check size via HEAD request first
+                if not _is_trusted_download_url(file_url):
+                    msg = f"Security warning: Refusing to download '{file_name}' from untrusted URL '{file_url}'."
+                    warnings.append(msg)
+                    file_infos.append(
+                        OutputFileInfo(
+                            file_name=file_name,
+                            downloaded=False,
+                            skipped_reason=msg,
+                        )
+                    )
+                    continue
+
+                # Check size via HEAD request first (using unauthenticated request to signed CDN URL)
                 size_bytes: int | None = None
                 try:
-                    head_resp = client.head(file_url)
+                    head_resp = httpx.head(file_url, timeout=self.timeout, follow_redirects=False)
                     cl = head_resp.headers.get("Content-Length")
                     if cl is not None and cl.isdigit():
                         size_bytes = int(cl)
@@ -526,26 +617,58 @@ class KaggleGPUClient:
                         )
                         continue
 
-                # Prevent path traversal
-                safe_rel = Path(file_name)
-                if safe_rel.is_absolute() or ".." in safe_rel.parts:
-                    safe_rel = Path(safe_rel.name)
-                dest_path = target_dir / safe_rel
+                # Prevent path traversal (strict containment inside target_dir)
+                raw_rel = Path(file_name)
+                if raw_rel.is_absolute() or raw_rel.drive or ".." in raw_rel.parts:
+                    safe_rel = Path(raw_rel.name)
+                else:
+                    safe_rel = raw_rel
+                dest_path = (target_dir / safe_rel).resolve()
+                if not dest_path.is_relative_to(target_dir):
+                    msg = f"Security warning: Skipped '{file_name}' due to path traversal outside '{target_dir}'."
+                    warnings.append(msg)
+                    file_infos.append(
+                        OutputFileInfo(
+                            file_name=file_name,
+                            downloaded=False,
+                            skipped_reason=msg,
+                        )
+                    )
+                    continue
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Stream download
+                # Stream download with mid-stream byte budget enforcement (in case Content-Length was omitted)
                 downloaded_bytes = 0
-                with client.stream("GET", file_url) as dl_resp:
+                aborted_mid_stream = False
+                with httpx.stream("GET", file_url, timeout=self.timeout, follow_redirects=False) as dl_resp:
                     dl_resp.raise_for_status()
                     with dest_path.open("wb") as out_f:
                         for chunk in dl_resp.iter_bytes(chunk_size=65536):
-                            out_f.write(chunk)
                             downloaded_bytes += len(chunk)
+                            if not force_large and downloaded_bytes > max_bytes:
+                                aborted_mid_stream = True
+                                break
+                            out_f.write(chunk)
 
-                # If it's a zip archive, extract it into target_dir
+                if aborted_mid_stream:
+                    dest_path.unlink(missing_ok=True)
+                    msg = (
+                        f"Aborted download of '{file_name}' after exceeding max_size_mb={max_size_mb} MB mid-stream (Gotcha #5)."
+                    )
+                    warnings.append(msg)
+                    file_infos.append(
+                        OutputFileInfo(
+                            file_name=file_name,
+                            size_bytes=downloaded_bytes,
+                            downloaded=False,
+                            skipped_reason=msg,
+                        )
+                    )
+                    continue
+
+                # If it's a zip archive, extract it safely into target_dir (blocking Zip Slip & Zip Bombs)
                 if dest_path.suffix.lower() == ".zip" and zipfile.is_zipfile(dest_path):
-                    with zipfile.ZipFile(dest_path, "r") as zf:
-                        zf.extractall(target_dir)
+                    _safe_extract_zip(dest_path, target_dir, max_total_bytes=max_bytes * 2)
 
                 file_infos.append(
                     OutputFileInfo(

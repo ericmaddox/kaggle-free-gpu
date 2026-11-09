@@ -120,9 +120,15 @@ class KernelMetadata(BaseModel):
             else:
                 errors.append(msg)
 
-        # 3. Check code_file existence & non-empty
-        code_path = (folder / self.code_file).resolve()
-        if not code_path.is_file():
+        # 3. Check code_file existence, non-empty, and strict containment within folder (prevent path traversal)
+        resolved_folder = folder.resolve()
+        raw_code_path = Path(self.code_file)
+        code_path = (resolved_folder / raw_code_path).resolve()
+        if raw_code_path.is_absolute() or raw_code_path.drive or not code_path.is_relative_to(resolved_folder):
+            errors.append(
+                f"Security error: code_file '{self.code_file}' resolves outside the kernel directory '{resolved_folder}'."
+            )
+        elif not code_path.is_file():
             errors.append(
                 f"Code file '{self.code_file}' does not exist in '{folder}'."
             )
@@ -140,7 +146,7 @@ class KernelMetadata(BaseModel):
         # 5. GPU check reminder
         if not self.enable_gpu:
             warnings.append(
-                "Kernel has 'enable_gpu': false — it will run on CPU only, not Tesla T4 x2."
+                "Kernel has 'enable_gpu': false -- it will run on CPU only, not Tesla T4 x2."
             )
 
         return ValidationReport(

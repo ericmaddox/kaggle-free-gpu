@@ -9,6 +9,7 @@ pushes and measured runtimes, and always direct the user to Settings -> GPU Quot
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -73,12 +74,14 @@ class QuotaLedger:
             return []
 
     def _save_entries(self, entries: list[QuotaRunEntry]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "runs": [e.model_dump() for e in entries],
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        with contextlib.suppress(OSError):
+            self.path.chmod(0o600)
 
     def record_push(
         self,
