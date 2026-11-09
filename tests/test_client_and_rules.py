@@ -11,6 +11,7 @@ import pytest
 from kaggle_free_gpu import server
 from kaggle_free_gpu.cli import build_parser
 from kaggle_free_gpu.client import (
+    KaggleAuthError,
     KaggleGPUClient,
     _safe_extract_zip,
     resolve_auth_headers,
@@ -241,6 +242,20 @@ def test_security_controls_path_traversal_ssrf_and_zip_slip(tmp_path: Path) -> N
         zf.writestr("../../escaped.txt", "pwned")
     with pytest.raises(ValueError, match="Zip Slip"):
         _safe_extract_zip(bad_zip, tmp_path / "extract_target", max_total_bytes=1024 * 1024)
+
+    # 6. Reject CRLF / header injection in credentials
+    with pytest.raises(KaggleAuthError, match="Invalid characters in Kaggle credential"):
+        resolve_auth_headers(api_token="KGAT_test\r\nX-Injected: evil")
+
+    # 7. Reject invalid characters in metadata 'id'
+    bad_meta = KernelMetadata(
+        id="testuser/bad$(id)",
+        title="Bad ID Title",
+        code_file="script.py",
+    )
+    bad_report = bad_meta.validate_for_push(kernel_dir)
+    assert not bad_report.valid
+    assert any("Invalid characters in metadata 'id'" in err for err in bad_report.errors)
 
 
 def test_mcp_server_tools_and_cli_parser(tmp_path: Path) -> None:

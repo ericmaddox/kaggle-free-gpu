@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
 from kaggle_free_gpu.client import KaggleAPIError, KaggleAuthError, KaggleGPUClient
 
 console = Console()
+_ANSI_CTRL_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _safe_text(val: object) -> str:
+    """Strip ANSI/OSC terminal escape codes and escape Rich markup tags from untrusted text."""
+    cleaned = _ANSI_CTRL_RE.sub("", str(val if val is not None else ""))
+    return rich_escape(cleaned)
 
 
 def _poll_until_done(client: KaggleGPUClient, ref: str, poll_interval: float = 10.0, timeout_sec: float = 3600.0) -> str:
@@ -26,16 +35,16 @@ def _poll_until_done(client: KaggleGPUClient, ref: str, poll_interval: float = 1
         status = res.status
         elapsed = int(time.time() - start)
         if status != last_status:
-            console.print(f"[cyan][{elapsed}s][/cyan] {ref} -> [bold]{status}[/bold]")
+            console.print(f"[cyan][{elapsed}s][/cyan] {_safe_text(ref)} -> [bold]{_safe_text(status)}[/bold]")
             last_status = status
         if status in ("COMPLETE", "ERROR") or status.startswith("ERROR_"):
             if res.failure_message:
-                console.print(f"[red]Failure:[/red] {res.failure_message}")
+                console.print(f"[red]Failure:[/red] {_safe_text(res.failure_message)}")
             if res.hint:
-                console.print(f"[yellow]Hint:[/yellow] {res.hint}")
+                console.print(f"[yellow]Hint:[/yellow] {_safe_text(res.hint)}")
             return status
         if elapsed >= timeout_sec:
-            console.print(f"[yellow]Timeout reached ({timeout_sec}s) while status is {status}.[/yellow]")
+            console.print(f"[yellow]Timeout reached ({timeout_sec}s) while status is {_safe_text(status)}.[/yellow]")
             return status
         time.sleep(poll_interval)
 
@@ -48,20 +57,20 @@ def cmd_push(args: argparse.Namespace) -> int:
         return 0 if res.ok else 1
 
     for w in res.warnings:
-        console.print(f"[yellow]Warning:[/yellow] {w}")
+        console.print(f"[yellow]Warning:[/yellow] {_safe_text(w)}")
 
     if not res.ok:
-        console.print(Panel(res.error or "Push failed", title="[red]Push Rejected[/red]", border_style="red"))
+        console.print(Panel(_safe_text(res.error or "Push failed"), title="[red]Push Rejected[/red]", border_style="red"))
         return 1
 
     console.print(
         Panel(
             f"[bold green]Pushed successfully![/bold green]\n"
-            f"Ref: [cyan]{res.ref}[/cyan]\n"
-            f"Title: {res.title}\n"
-            f"Version: {res.version_number}\n"
+            f"Ref: [cyan]{_safe_text(res.ref)}[/cyan]\n"
+            f"Title: {_safe_text(res.title)}\n"
+            f"Version: {_safe_text(res.version_number)}\n"
             f"GPU Enabled: {res.enable_gpu} | Private: {res.is_private}\n"
-            f"URL: {res.url}",
+            f"URL: {_safe_text(res.url)}",
             title="Kaggle Free-GPU Push",
             border_style="green",
         )
@@ -73,9 +82,9 @@ def cmd_push(args: argparse.Namespace) -> int:
             return 1
         if args.out_dir:
             out_res = client.kernel_output(res.ref, args.out_dir)
-            console.print(f"[green]Output downloaded to:[/green] {out_res.out_dir} (runtime: {out_res.runtime_seconds}s)")
+            console.print(f"[green]Output downloaded to:[/green] {_safe_text(out_res.out_dir)} (runtime: {out_res.runtime_seconds}s)")
             if out_res.stdout_tail:
-                console.print(Panel(out_res.stdout_tail.strip(), title="Stdout", border_style="blue"))
+                console.print(Panel(_safe_text(out_res.stdout_tail.strip()), title="Stdout", border_style="blue"))
     return 0
 
 
@@ -91,11 +100,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0 if not res.status.startswith("ERROR") else 1
 
     color = "green" if res.status == "COMPLETE" else ("red" if "ERROR" in res.status else "yellow")
-    console.print(f"[bold]{res.ref}[/bold]: [{color}]{res.status}[/{color}]")
+    console.print(f"[bold]{_safe_text(res.ref)}[/bold]: [{color}]{_safe_text(res.status)}[/{color}]")
     if res.failure_message:
-        console.print(f"[red]Failure:[/red] {res.failure_message}")
+        console.print(f"[red]Failure:[/red] {_safe_text(res.failure_message)}")
     if res.hint:
-        console.print(f"[yellow]Hint:[/yellow] {res.hint}")
+        console.print(f"[yellow]Hint:[/yellow] {_safe_text(res.hint)}")
     return 0 if not res.status.startswith("ERROR") else 1
 
 
@@ -112,12 +121,12 @@ def cmd_output(args: argparse.Namespace) -> int:
         return 0
 
     for w in res.warnings:
-        console.print(f"[yellow]Warning:[/yellow] {w}")
+        console.print(f"[yellow]Warning:[/yellow] {_safe_text(w)}")
     if res.hint:
-        console.print(f"[yellow]Hint:[/yellow] {res.hint}")
+        console.print(f"[yellow]Hint:[/yellow] {_safe_text(res.hint)}")
 
     console.print(
-        f"[bold green]Pulled output for {res.ref}[/bold green] -> [cyan]{res.out_dir}[/cyan] "
+        f"[bold green]Pulled output for {_safe_text(res.ref)}[/bold green] -> [cyan]{_safe_text(res.out_dir)}[/cyan] "
         f"(runtime: {res.runtime_seconds}s, GPU-hrs: {res.gpu_hours_recorded})"
     )
     if res.files:
@@ -127,16 +136,16 @@ def cmd_output(args: argparse.Namespace) -> int:
         table.add_column("Downloaded")
         for f in res.files:
             table.add_row(
-                f.file_name,
+                _safe_text(f.file_name),
                 str(f.size_bytes) if f.size_bytes is not None else "?",
-                "[green]Yes[/green]" if f.downloaded else f"[red]Skipped[/red] ({f.skipped_reason})",
+                "[green]Yes[/green]" if f.downloaded else f"[red]Skipped[/red] ({_safe_text(f.skipped_reason)})",
             )
         console.print(table)
 
     if res.stdout_tail:
-        console.print(Panel(res.stdout_tail.strip(), title="Stdout (Tail)", border_style="blue"))
+        console.print(Panel(_safe_text(res.stdout_tail.strip()), title="Stdout (Tail)", border_style="blue"))
     if res.stderr_tail.strip():
-        console.print(Panel(res.stderr_tail.strip(), title="Stderr (Tail)", border_style="yellow"))
+        console.print(Panel(_safe_text(res.stderr_tail.strip()), title="Stderr (Tail)", border_style="yellow"))
     return 0
 
 
@@ -160,10 +169,10 @@ def cmd_list(args: argparse.Namespace) -> int:
     table.add_column("Last Run (UTC)")
     for item in items:
         table.add_row(
-            item["ref"],
-            item["title"],
-            item["author"],
-            item["last_run_time"],
+            _safe_text(item["ref"]),
+            _safe_text(item["title"]),
+            _safe_text(item["author"]),
+            _safe_text(item["last_run_time"]),
         )
     console.print(table)
     return 0
@@ -174,7 +183,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
     confirmed = args.yes
     if not confirmed:
         console.print(
-            f"[bold red]WARNING:[/bold red] Deleting kernel [cyan]{args.ref}[/cyan] is "
+            f"[bold red]WARNING:[/bold red] Deleting kernel [cyan]{_safe_text(args.ref)}[/cyan] is "
             "[bold]PERMANENT and UNRECOVERABLE[/bold]."
         )
         ans = input(f"Type '{args.ref}' to confirm permanent deletion: ").strip()
@@ -189,9 +198,9 @@ def cmd_delete(args: argparse.Namespace) -> int:
         return 0 if res.get("deleted") else 1
 
     if res.get("deleted"):
-        console.print(f"[green]Deleted kernel {args.ref}.[/green]")
+        console.print(f"[green]Deleted kernel {_safe_text(args.ref)}.[/green]")
         return 0
-    console.print(f"[red]{res.get('message')}[/red]")
+    console.print(f"[red]{_safe_text(res.get('message'))}[/red]")
     return 1
 
 
@@ -290,7 +299,7 @@ def main() -> None:
         rc = args.func(args)
         sys.exit(rc)
     except (KaggleAuthError, KaggleAPIError, FileNotFoundError, ValueError) as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
+        console.print(f"[bold red]Error:[/bold red] {_safe_text(exc)}")
         sys.exit(1)
 
 

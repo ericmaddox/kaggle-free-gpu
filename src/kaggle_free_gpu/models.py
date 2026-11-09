@@ -9,6 +9,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+_SAFE_ID_PART_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+_MAX_CODE_FILE_BYTES = 10 * 1024 * 1024  # 10 MB cap to prevent local OOM / payload DoS
+
 
 def slugify_title(title: str) -> str:
     """Derive Kaggle's URL slug from a kernel title.
@@ -96,6 +99,15 @@ class KernelMetadata(BaseModel):
                 errors.append(
                     "Metadata 'id' uses placeholder '<owner>'. Set KAGGLE_USERNAME or replace '<owner>' with your Kaggle username in kernel-metadata.json."
                 )
+            elif (
+                ".." in owner
+                or ".." in id_slug
+                or not _SAFE_ID_PART_RE.match(owner)
+                or not _SAFE_ID_PART_RE.match(id_slug)
+            ):
+                errors.append(
+                    f"Security error: Invalid characters in metadata 'id' ('{self.id}'). Only alphanumeric, '-', '_', and '.' are allowed."
+                )
 
         if expected_owner and owner and owner not in ("<owner>", "your-username", "owner") and owner.lower() != expected_owner.lower():
             warnings.append(
@@ -120,17 +132,26 @@ class KernelMetadata(BaseModel):
             else:
                 errors.append(msg)
 
-        # 3. Check code_file existence, non-empty, and strict containment within folder (prevent path traversal)
+        # 3. Check code_file existence, size cap, non-empty, and strict containment within folder (prevent path traversal)
         resolved_folder = folder.resolve()
-        raw_code_path = Path(self.code_file)
+        raw_code_path = Path(self.code_file.replace("\\", "/"))
         code_path = (resolved_folder / raw_code_path).resolve()
-        if raw_code_path.is_absolute() or raw_code_path.drive or not code_path.is_relative_to(resolved_folder):
+        if (
+            raw_code_path.is_absolute()
+            or raw_code_path.drive
+            or ".." in raw_code_path.parts
+            or not code_path.is_relative_to(resolved_folder)
+        ):
             errors.append(
                 f"Security error: code_file '{self.code_file}' resolves outside the kernel directory '{resolved_folder}'."
             )
         elif not code_path.is_file():
             errors.append(
                 f"Code file '{self.code_file}' does not exist in '{folder}'."
+            )
+        elif code_path.stat().st_size > _MAX_CODE_FILE_BYTES:
+            errors.append(
+                f"Code file '{self.code_file}' exceeds maximum allowed size ({_MAX_CODE_FILE_BYTES // (1024 * 1024)} MB)."
             )
         else:
             content = code_path.read_text(encoding="utf-8", errors="replace")

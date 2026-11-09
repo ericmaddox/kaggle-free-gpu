@@ -48,6 +48,14 @@ class KaggleAPIError(RuntimeError):
         super().__init__(full)
 
 
+def _sanitize_credential(value: str, label: str) -> str:
+    """Strip outer whitespace and reject control characters (prevents HTTP header / CRLF injection)."""
+    cleaned = str(value).strip()
+    if not cleaned or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise KaggleAuthError(f"Invalid characters in Kaggle credential '{label}'.")
+    return cleaned
+
+
 def resolve_auth_headers(
     api_token: str | None = None,
     username: str | None = None,
@@ -65,17 +73,22 @@ def resolve_auth_headers(
     Returns:
         Tuple of (headers_dict, known_username_or_none)
     """
-    env_username = username or os.environ.get("KAGGLE_USERNAME")
+    raw_env_user = username or os.environ.get("KAGGLE_USERNAME")
+    env_username = _sanitize_credential(raw_env_user, "username") if raw_env_user else None
 
     # 1. Explicit arguments take highest priority
     if api_token:
-        return {"Authorization": f"Bearer {api_token}"}, env_username
+        tok = _sanitize_credential(api_token, "api_token")
+        return {"Authorization": f"Bearer {tok}"}, env_username
     if key and key.startswith("KGAT_"):
-        return {"Authorization": f"Bearer {key}"}, env_username
+        tok = _sanitize_credential(key, "key")
+        return {"Authorization": f"Bearer {tok}"}, env_username
     if username and key:
-        raw = f"{username}:{key}".encode()
+        u = _sanitize_credential(username, "username")
+        k = _sanitize_credential(key, "key")
+        raw = f"{u}:{k}".encode()
         b64 = base64.b64encode(raw).decode("ascii")
-        return {"Authorization": f"Basic {b64}"}, username
+        return {"Authorization": f"Basic {b64}"}, u
 
     # 2. Environment variable or ~/.kaggle/access_token
     token = os.environ.get("KAGGLE_API_TOKEN")
@@ -85,14 +98,17 @@ def resolve_auth_headers(
             token = access_token_path.read_text(encoding="utf-8").strip()
 
     if token:
-        return {"Authorization": f"Bearer {token}"}, env_username
+        tok = _sanitize_credential(token, "access_token")
+        return {"Authorization": f"Bearer {tok}"}, env_username
 
     env_key = key or os.environ.get("KAGGLE_KEY")
     if env_key and env_key.startswith("KGAT_"):
-        return {"Authorization": f"Bearer {env_key}"}, env_username
+        tok = _sanitize_credential(env_key, "KAGGLE_KEY")
+        return {"Authorization": f"Bearer {tok}"}, env_username
 
     if env_username and env_key:
-        raw = f"{env_username}:{env_key}".encode()
+        k = _sanitize_credential(env_key, "KAGGLE_KEY")
+        raw = f"{env_username}:{k}".encode()
         b64 = base64.b64encode(raw).decode("ascii")
         return {"Authorization": f"Basic {b64}"}, env_username
 
@@ -101,18 +117,26 @@ def resolve_auth_headers(
         try:
             data = json.loads(kaggle_json_path.read_text(encoding="utf-8"))
             file_token = data.get("token") or data.get("access_token")
-            file_user = data.get("username") or env_username
+            raw_file_user = data.get("username") or env_username
+            file_user = _sanitize_credential(raw_file_user, "username") if raw_file_user else None
             file_key = data.get("key")
             if file_token:
-                return {"Authorization": f"Bearer {file_token}"}, file_user
+                tok = _sanitize_credential(str(file_token), "token")
+                return {"Authorization": f"Bearer {tok}"}, file_user
             if file_key and str(file_key).startswith("KGAT_"):
-                return {"Authorization": f"Bearer {file_key}"}, file_user
+                tok = _sanitize_credential(str(file_key), "key")
+                return {"Authorization": f"Bearer {tok}"}, file_user
             if file_user and file_key:
-                raw = f"{file_user}:{file_key}".encode()
+                k = _sanitize_credential(str(file_key), "key")
+                raw = f"{file_user}:{k}".encode()
                 b64 = base64.b64encode(raw).decode("ascii")
                 return {"Authorization": f"Basic {b64}"}, file_user
+        except KaggleAuthError:
+            raise
         except Exception as exc:
-            raise KaggleAuthError(f"Failed to parse ~/.kaggle/kaggle.json: {exc}") from exc
+            raise KaggleAuthError(
+                f"Failed to parse ~/.kaggle/kaggle.json ({type(exc).__name__})."
+            ) from exc
 
     raise KaggleAuthError(
         "No Kaggle credentials found. Provide one of:\n"
@@ -122,6 +146,8 @@ def resolve_auth_headers(
 
 
 _SAFE_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+_MAX_METADATA_BYTES = 1024 * 1024  # 1 MB cap for kernel-metadata.json
+_MAX_ZIP_FILES = 10_000
 _ALLOWED_API_HOSTS = {"www.kaggle.com", "kaggle.com"}
 _ALLOWED_DOWNLOAD_HOST_SUFFIXES = (
     ".kaggleusercontent.com",
@@ -146,7 +172,12 @@ def split_owner_slug(owner_slug: str) -> tuple[str, str]:
         raise ValueError(
             f"Invalid kernel reference '{owner_slug}'. Both owner and slug must be non-empty."
         )
-    if not _SAFE_SLUG_RE.match(owner) or not _SAFE_SLUG_RE.match(slug):
+    if (
+        ".." in owner
+        or ".." in slug
+        or not _SAFE_SLUG_RE.match(owner)
+        or not _SAFE_SLUG_RE.match(slug)
+    ):
         raise ValueError(
             f"Invalid characters in kernel reference '{owner_slug}'. Only alphanumeric, '-', '_', and '.' are allowed."
         )
@@ -186,19 +217,32 @@ def _safe_extract_zip(zip_path: Path, target_dir: Path, max_total_bytes: int) ->
     resolved_target = target_dir.resolve()
     total_extracted = 0
     with zipfile.ZipFile(zip_path, "r") as zf:
-        for info in zf.infolist():
+        members = zf.infolist()
+        if len(members) > _MAX_ZIP_FILES:
+            raise ValueError(
+                f"Security error: Zip archive contains too many entries ({len(members)} > {_MAX_ZIP_FILES})."
+            )
+        for info in members:
             # Reject symlinks inside zip archive (POSIX S_IFLNK = 0o120000)
             mode = (info.external_attr >> 16) & 0o170000
             if mode == 0o120000:
                 raise ValueError(f"Security error: Refusing to extract symlink '{info.filename}' from zip archive.")
 
-            rel_member = Path(info.filename)
-            if rel_member.is_absolute() or rel_member.drive or ".." in rel_member.parts:
+            normalized_name = info.filename.replace("\\", "/")
+            rel_member = Path(normalized_name)
+            if (
+                "\\" in info.filename
+                or rel_member.is_absolute()
+                or rel_member.drive
+                or ".." in rel_member.parts
+            ):
                 raise ValueError(f"Security error: Zip Slip path traversal detected in '{info.filename}'.")
 
             dest = (resolved_target / rel_member).resolve()
             if not dest.is_relative_to(resolved_target):
                 raise ValueError(f"Security error: Zip member '{info.filename}' resolves outside target directory.")
+            if dest.is_symlink():
+                raise ValueError(f"Security error: Refusing to overwrite symlink at '{dest}'.")
 
             if info.is_dir():
                 dest.mkdir(parents=True, exist_ok=True)
@@ -267,10 +311,14 @@ class KaggleGPUClient:
     ) -> tuple[KernelMetadata, ValidationReport]:
         """Load and validate kernel-metadata.json from a directory."""
         folder = Path(dir_path).expanduser().resolve()
-        meta_path = folder / "kernel-metadata.json"
-        if not meta_path.is_file():
+        meta_path = (folder / "kernel-metadata.json").resolve()
+        if not meta_path.is_relative_to(folder) or not meta_path.is_file():
             raise FileNotFoundError(
                 f"Missing kernel-metadata.json in directory: {folder}"
+            )
+        if meta_path.stat().st_size > _MAX_METADATA_BYTES:
+            raise ValueError(
+                f"kernel-metadata.json exceeds maximum allowed size ({_MAX_METADATA_BYTES} bytes)."
             )
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
         meta = KernelMetadata.model_validate(raw)
@@ -617,15 +665,19 @@ class KaggleGPUClient:
                         )
                         continue
 
-                # Prevent path traversal (strict containment inside target_dir)
-                raw_rel = Path(file_name)
-                if raw_rel.is_absolute() or raw_rel.drive or ".." in raw_rel.parts:
-                    safe_rel = Path(raw_rel.name)
-                else:
-                    safe_rel = raw_rel
-                dest_path = (target_dir / safe_rel).resolve()
-                if not dest_path.is_relative_to(target_dir):
-                    msg = f"Security warning: Skipped '{file_name}' due to path traversal outside '{target_dir}'."
+                # Prevent path traversal (strict containment inside target_dir; reject traversal paths outright)
+                raw_rel = Path(file_name.replace("\\", "/"))
+                dest_path = (target_dir / raw_rel).resolve()
+                if (
+                    "\\" in file_name
+                    or raw_rel.is_absolute()
+                    or raw_rel.drive
+                    or ".." in raw_rel.parts
+                    or dest_path == target_dir
+                    or dest_path.is_symlink()
+                    or not dest_path.is_relative_to(target_dir)
+                ):
+                    msg = f"Security warning: Skipped '{file_name}' due to unsafe or traversal file path."
                     warnings.append(msg)
                     file_infos.append(
                         OutputFileInfo(
@@ -645,7 +697,11 @@ class KaggleGPUClient:
                     with dest_path.open("wb") as out_f:
                         for chunk in dl_resp.iter_bytes(chunk_size=65536):
                             downloaded_bytes += len(chunk)
-                            if not force_large and downloaded_bytes > max_bytes:
+                            if size_bytes is None:
+                                total_planned_bytes += len(chunk)
+                            if not force_large and (
+                                downloaded_bytes > max_bytes or total_planned_bytes > max_bytes * 2
+                            ):
                                 aborted_mid_stream = True
                                 break
                             out_f.write(chunk)
