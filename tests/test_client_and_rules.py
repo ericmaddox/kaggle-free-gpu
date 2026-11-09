@@ -183,7 +183,7 @@ def test_client_push_status_output_and_size_guard(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     with (
         patch("httpx.Client.post", return_value=mock_out_resp),
-        patch("httpx.head", return_value=mock_head_resp),
+        patch("httpx.Client.head", return_value=mock_head_resp),
     ):
         out_res = client.kernel_output("testuser/my-gpu-test", out_dir, max_size_mb=500, force_large=False)
         assert out_res.runtime_seconds == 42.5

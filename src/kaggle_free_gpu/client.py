@@ -285,6 +285,14 @@ class KaggleGPUClient:
         self.quota_ledger = quota_ledger or QuotaLedger()
         self.timeout = timeout
 
+    def _http_client(self, follow_redirects: bool = True) -> httpx.Client:
+        """Create an HTTP client ignoring environment proxies (e.g. malformed or bracketed IPv6 in VMs)."""
+        return httpx.Client(
+            timeout=self.timeout,
+            follow_redirects=follow_redirects,
+            trust_env=False,
+        )
+
     def _headers(self) -> dict[str, str]:
         return {
             **self._auth_headers,
@@ -384,7 +392,7 @@ class KaggleGPUClient:
         }
 
         url = f"{self.base_url}/kernels/push"
-        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+        with self._http_client(follow_redirects=True) as client:
             resp = client.post(url, headers=self._headers(), json=payload)
 
         if resp.status_code >= 400:
@@ -474,7 +482,7 @@ class KaggleGPUClient:
         url = f"{self.base_url}/kernels.KernelsApiService/GetKernelSessionStatus"
         payload = {"userName": owner, "kernelSlug": slug}
 
-        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+        with self._http_client(follow_redirects=True) as client:
             resp = client.post(url, headers=self._headers(), json=payload)
 
         if resp.status_code == 403:
@@ -533,7 +541,7 @@ class KaggleGPUClient:
         url = f"{self.base_url}/kernels.KernelsApiService/ListKernelSessionOutput"
         payload = {"userName": owner, "kernelSlug": slug}
 
-        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+        with self._http_client(follow_redirects=True) as client:
             resp = client.post(url, headers=self._headers(), json=payload)
 
             if resp.status_code == 403:
@@ -623,10 +631,11 @@ class KaggleGPUClient:
                 # Check size via HEAD request first (using unauthenticated request to signed CDN URL)
                 size_bytes: int | None = None
                 try:
-                    head_resp = httpx.head(file_url, timeout=self.timeout, follow_redirects=False)
-                    cl = head_resp.headers.get("Content-Length")
-                    if cl is not None and cl.isdigit():
-                        size_bytes = int(cl)
+                    with self._http_client(follow_redirects=False) as head_client:
+                        head_resp = head_client.head(file_url)
+                        cl = head_resp.headers.get("Content-Length")
+                        if cl is not None and cl.isdigit():
+                            size_bytes = int(cl)
                 except Exception:
                     size_bytes = None
 
@@ -692,7 +701,10 @@ class KaggleGPUClient:
                 # Stream download with mid-stream byte budget enforcement (in case Content-Length was omitted)
                 downloaded_bytes = 0
                 aborted_mid_stream = False
-                with httpx.stream("GET", file_url, timeout=self.timeout, follow_redirects=False) as dl_resp:
+                with (
+                    self._http_client(follow_redirects=False) as dl_client,
+                    dl_client.stream("GET", file_url) as dl_resp,
+                ):
                     dl_resp.raise_for_status()
                     with dest_path.open("wb") as out_f:
                         for chunk in dl_resp.iter_bytes(chunk_size=65536):
@@ -775,7 +787,7 @@ class KaggleGPUClient:
             params["search"] = search
 
         url = f"{self.base_url}/kernels/list"
-        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+        with self._http_client(follow_redirects=True) as client:
             resp = client.get(url, headers=self._headers(), params=params)
 
         if resp.status_code >= 400:
@@ -826,7 +838,7 @@ class KaggleGPUClient:
         url = f"{self.base_url}/kernels.KernelsApiService/DeleteKernel"
         payload = {"userName": owner, "kernelSlug": slug}
 
-        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+        with self._http_client(follow_redirects=True) as client:
             resp = client.post(url, headers=self._headers(), json=payload)
 
         if resp.status_code >= 400:
